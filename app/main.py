@@ -3,6 +3,9 @@ from typing import Any, Dict, Optional
 from fastapi import UploadFile, File, Form
 import os
 import shutil
+import httpx
+
+from app.api.voice import router as voice_router
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -12,7 +15,7 @@ from app.core.exceptions import KrishiKalyanException, ValidationException
 from app.database.firestore import firestore_service
 from app.engine.context_builder import context_builder
 from app.engine.decision_engine import decision_engine
-
+from app.api.telegram import router as telegram_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,6 +44,38 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     user_id: Optional[str] = Field(default="demo_user", min_length=1)
 
+
+@app.on_event("startup")
+async def telegram_startup():
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+
+    webhook_url = (
+        "https://unadducible-submedially-sana.ngrok-free.dev"
+        "/telegram/webhook"
+    )
+
+    async with httpx.AsyncClient() as client:
+
+        # Delete old webhook + clear queued messages
+        r1 = await client.get(
+            f"https://api.telegram.org/bot{token}/deleteWebhook",
+            params={
+                "drop_pending_updates": True
+            }
+        )
+
+        print(r1.json())
+
+        # Register fresh webhook
+        r2 = await client.get(
+            f"https://api.telegram.org/bot{token}/setWebhook",
+            params={
+                "url": webhook_url
+            }
+        )
+
+        print(r2.json())
 
 def success_response(data: Any) -> Dict[str, Any]:
     return {
@@ -118,6 +153,13 @@ async def root() -> Dict[str, Any]:
         }
     )
 
+app.include_router(
+    voice_router,
+    tags=["Voice"],
+)
+
+
+app.include_router(telegram_router)
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
