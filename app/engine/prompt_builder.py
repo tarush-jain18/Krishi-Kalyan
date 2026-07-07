@@ -23,6 +23,44 @@ STRICT RULES:
    - 🌱 Organic Remedies
    - 💊 Chemical Control (if severity is High or Medium)
    - 🛡️ Prevention (for next season)
+6. If the farmer asks:
+   - Which fertilizer should I use?
+   - Recommend fertilizer.
+   - Best fertilizer for my crop.
+   - Fertilizer recommendation.
+
+   Always call the get_fertilizer_recommendation tool.
+
+7. Never recommend a fertilizer from your own knowledge.
+   Always rely on the trained fertilizer recommendation model.
+
+8. After get_fertilizer_recommendation returns, explain:
+   - 🌱 Recommended Fertilizer
+   - 📊 Confidence
+   - 🏆 Top 3 Recommendations
+   - ❓ Why it is suitable
+   - 🧪 How to apply
+   - ⚠️ Precautions
+
+9. If the farmer asks:
+   - Should I irrigate today?
+   - Do I need irrigation?
+   - Water recommendation.
+   - Irrigation recommendation.
+   - How much water should I give?
+
+   Always call the get_irrigation_recommendation tool.
+
+10. Never recommend irrigation yourself.
+    Always rely on the trained irrigation recommendation model.
+
+11. After get_irrigation_recommendation returns, explain:
+   - 💧 Irrigation Recommendation
+   - 📊 Confidence
+   - 💦 Recommended Water (mm)
+   - ⚠️ Urgency
+   - 🏆 Top 3 Predictions
+   - 🌱 Irrigation Advice
 """.strip()
 
 
@@ -103,6 +141,76 @@ FARMER QUESTION
             f"Do NOT reference the farm's current_crop if it differs from the diagnosed plant — "
             f"trust the model result."
         )
+    def build_post_fertilizer_nudge(self, tool_result: Dict[str, Any]) -> str:
 
+        fertilizer = tool_result.get(
+            "recommended_fertilizer",
+            "Unknown",
+        )
+
+        confidence = tool_result.get(
+            "confidence",
+            "N/A",
+        )
+
+        return (
+            f"The fertilizer recommendation model has completed prediction.\n"
+            f"Recommended Fertilizer: {fertilizer}\n"
+            f"Confidence: {confidence}%\n\n"
+            f"Now explain the recommendation using ONLY the tool result.\n"
+            f"Include:\n"
+            f"- Recommended fertilizer\n"
+            f"- Confidence\n"
+            f"- Top 3 recommendations\n"
+            f"- Why it is suitable\n"
+            f"- Application advice\n"
+            f"- Precautions\n\n"
+            f"Do NOT call get_fertilizer_recommendation again."
+        )
+
+    def build_post_irrigation_nudge(
+        self,
+        tool_result: Dict[str, Any],
+    ) -> str:
+
+        recommendation = tool_result.get(
+            "irrigation_recommendation",
+            "Unknown",
+        )
+
+        confidence = tool_result.get(
+            "confidence",
+            "N/A",
+        )
+
+        water = tool_result.get(
+            "recommended_water_mm",
+            "N/A",
+        )
+
+        urgency = tool_result.get(
+            "urgency",
+            "Unknown",
+        )
+
+        return (
+            f"The irrigation recommendation model has completed prediction.\n"
+            f"Recommendation: {recommendation}\n"
+            f"Confidence: {confidence}%\n"
+            f"Recommended Water: {water} mm\n"
+            f"Urgency: {urgency}\n\n"
+
+            f"Now explain the recommendation using ONLY the tool result.\n"
+
+            f"Include:\n"
+            f"- Irrigation recommendation\n"
+            f"- Confidence\n"
+            f"- Recommended water\n"
+            f"- Urgency\n"
+            f"- Top 3 predictions\n"
+            f"- Irrigation advice\n\n"
+
+            f"Do NOT call get_irrigation_recommendation again."
+        )
 
 prompt_builder = PromptBuilder()

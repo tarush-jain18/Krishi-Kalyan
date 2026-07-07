@@ -5,6 +5,8 @@ from google.genai import types
 from app.tools.get_pest_risk import get_pest_risk
 from app.tools.get_fertilizer_advice import get_fertilizer_advice
 from app.core.exceptions import ToolExecutionException
+
+from app.ml.model_manager import model_manager
 from app.tools.mock_tools import (
     get_pest_diagnosis,
     get_crop_recommendation,
@@ -28,6 +30,8 @@ class ToolRegistry:
             "get_pest_risk": get_pest_risk,
             "get_fertilizer_advice": get_fertilizer_advice,
             "get_pest_diagnosis": get_pest_diagnosis,
+            "get_fertilizer_recommendation": lambda snapshot: model_manager.fertilizer.predict(snapshot),
+            "get_irrigation_recommendation": lambda snapshot: model_manager.irrigation.predict(snapshot),
         }
 
     @property
@@ -107,6 +111,22 @@ class ToolRegistry:
                         "longitude",
                         "crop",
                     ],
+                },
+            ),
+                        types.FunctionDeclaration(
+                name="get_fertilizer_recommendation",
+                description="Predict the most suitable fertilizer using the trained machine learning model.",
+                parameters={
+                    "type": "OBJECT",
+                    "properties": {},
+                },
+            ),
+                        types.FunctionDeclaration(
+                name="get_irrigation_recommendation",
+                description="Predict irrigation recommendation using the trained machine learning model.",
+                parameters={
+                    "type": "OBJECT",
+                    "properties": {},
                 },
             ),
                         types.FunctionDeclaration(
@@ -214,6 +234,16 @@ class ToolRegistry:
                     snapshot=context["snapshot"]
                 )
 
+            elif name == "get_fertilizer_recommendation":
+                result = self._tools[name](
+                    snapshot=context["snapshot"]
+                )
+            
+            elif name == "get_irrigation_recommendation":
+                result = self._tools[name](
+                    snapshot=context["snapshot"]
+                )
+                
             elif name == "get_fertilizer_advice":
                 result = self._tools[name](
                     snapshot=context["snapshot"]

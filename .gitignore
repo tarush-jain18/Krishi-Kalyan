@@ -11,7 +11,9 @@ __pycache__/
 .mypy_cache/
 .coverage
 htmlcov/
-
+# Google Credentials
+app/credentials/
+*.json
 # ==========================================
 # Virtual Environment
 # ==========================================
@@ -87,4 +89,4 @@ dist/
 # Misc
 # ==========================================
 *.sqlite3
-*.db
+*.dbapp/credentials/earth_engine.json

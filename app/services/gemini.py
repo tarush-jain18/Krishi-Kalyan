@@ -123,8 +123,23 @@ class GeminiService:
             # does not have to re-parse the JSON), and a generic nudge for all
             # other tools.
             if tool_name == "get_pest_diagnosis":
-                nudge_text = prompt_builder.build_post_diagnosis_nudge(tool_response_payload)
+
+                nudge_text = prompt_builder.build_post_diagnosis_nudge(
+                    tool_response_payload
+                )
+
+            elif tool_name == "get_fertilizer_recommendation":
+
+                nudge_text = prompt_builder.build_post_fertilizer_nudge(
+                    tool_response_payload
+                )
+
+            elif tool_name == "get_irrigation_recommendation":
+                nudge_text = prompt_builder.build_post_irrigation_nudge(
+                    tool_response_payload
+                )
             else:
+
                 nudge_text = (
                     "The tool has returned its result above. "
                     "Now provide the complete final answer to the farmer "
