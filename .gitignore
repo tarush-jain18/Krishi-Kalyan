@@ -63,16 +63,10 @@ logs/
 
 # ==========================================
 # Model Files (Large)
-# ==========================================
-*.h5
-*.keras
-*.ckpt
-*.pth
-*.pt
-*.onnx
+
 
 # Ignore trained models if they are too large
-app/ml/models/
+
 
 # ==========================================
 # Jupyter
