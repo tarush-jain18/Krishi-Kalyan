@@ -63,9 +63,11 @@ class ChatRequest(BaseModel):
 async def telegram_startup():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
 
+    base_url = os.getenv("BASE_URL")
+    if not base_url:
+        raise RuntimeError("BASE_URL environment variable is not set.")
     webhook_url = (
-        "https://unadducible-submedially-sana.ngrok-free.dev"
-        "/telegram/webhook"
+        f"{base_url}/telegram/webhook"
     )
 
     async with httpx.AsyncClient() as client:

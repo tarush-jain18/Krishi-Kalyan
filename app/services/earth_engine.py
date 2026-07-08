@@ -14,29 +14,36 @@ class EarthEngineService:
         service_account = os.getenv("EARTH_ENGINE_SERVICE_ACCOUNT")
         credentials_json = os.getenv("EARTH_ENGINE_CREDENTIALS")
 
-        if credentials_json:
+        print("SERVICE ACCOUNT ENV:", repr(service_account))
+        print("CREDENTIAL JSON ENV EXISTS:", credentials_json is not None)
 
-            # Railway
+        if credentials_json and credentials_json.strip():
+
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 suffix=".json",
                 delete=False,
             ) as f:
-
                 f.write(credentials_json)
                 credential_path = f.name
 
         else:
 
-            # Local Mac
             credential_path = "app/credentials/earth_engine.json"
 
+        print("Credential path:", credential_path)
+
+        with open(credential_path) as f:
+            print("First character:", repr(f.read(1)))
+
         credentials = ee.ServiceAccountCredentials(
-            service_account,
+            service_account or json.load(open(credential_path))["client_email"],
             credential_path,
         )
 
         ee.Initialize(credentials)
+
+        print("Earth Engine initialized")
 
     def get_crop_health(self, latitude, longitude):
 
