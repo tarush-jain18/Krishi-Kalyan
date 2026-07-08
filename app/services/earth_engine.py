@@ -1,3 +1,5 @@
+import json
+import tempfile
 import os
 import ee
 from dotenv import load_dotenv
@@ -8,9 +10,30 @@ load_dotenv()
 class EarthEngineService:
 
     def __init__(self):
+
+        service_account = os.getenv("EARTH_ENGINE_SERVICE_ACCOUNT")
+        credentials_json = os.getenv("EARTH_ENGINE_CREDENTIALS")
+
+        if credentials_json:
+
+            # Railway
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".json",
+                delete=False,
+            ) as f:
+
+                f.write(credentials_json)
+                credential_path = f.name
+
+        else:
+
+            # Local Mac
+            credential_path = "app/credentials/earth_engine.json"
+
         credentials = ee.ServiceAccountCredentials(
-            os.getenv("EARTH_ENGINE_SERVICE_ACCOUNT"),
-            os.getenv("EARTH_ENGINE_CREDENTIALS")
+            service_account,
+            credential_path,
         )
 
         ee.Initialize(credentials)
