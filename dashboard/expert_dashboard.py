@@ -36,9 +36,15 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 # We import the same firebase app so there is only one Firestore connection.
 try:
-    from app.database.firebase import db as firestore_client  # type: ignore
+    from app.database.firebase import db as firestore_client
     FIRESTORE_AVAILABLE = True
-except Exception:
+    print("✅ Firestore imported successfully")
+except Exception as e:
+    print("❌ FIREBASE IMPORT ERROR")
+    print(e)
+    import traceback
+    traceback.print_exc()
+
     FIRESTORE_AVAILABLE = False
     firestore_client = None
 

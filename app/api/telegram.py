@@ -1,30 +1,38 @@
 """
-app/api/telegram.py  [MODIFIED]
+app/api/telegram.py
 
-Changes vs original:
-  1. After every AI response, calls send_message_with_keyboard() instead of
-     send_message() — this appends the "👨‍🌾 Send to Expert" InlineKeyboard.
+Changes in this version
+-----------------------
+1. Removed the broken `from app.services.language_detector import detect_language`
+   import — that module does not exist and the variable `message` it was called
+   with was undefined at both call sites anyway.
+   Language detection is now entirely inside DecisionEngine.detect_language()
+   and is automatically propagated through context["detected_language"].
 
-  2. A pending_context store (in-memory dict) holds the last AI result +
-     context per user so the callback handler can create a ticket without
-     re-running the Decision Engine.
+2. Every `decision_engine.process()` call is replaced with
+   `await decision_engine.async_process()` — the non-blocking wrapper that
+   runs the synchronous Gemini call in a thread pool via asyncio.to_thread().
+   This fixes the "Lock blocking" server hang.
 
-  3. New callback_query branch handles when the farmer presses the button:
-       a. Answer the callback (removes loading spinner immediately).
-       b. Generate AI summary via expert_summary.
-       c. Create the expert ticket via expert_service.
-       d. Reply with confirmation + ticket ID.
+3. Tuple unpacking is now explicit everywhere:
+       result, context = await decision_engine.async_process(...)
+   No more isinstance(result, tuple) runtime guards.
 
-  4. All existing message-type branches (text / photo / voice / audio /
-     video_note) are UNCHANGED in logic — only the final send_message() call
-     is replaced with send_message_with_keyboard().
+4. speech_to_text_service.transcribe() (CPU-bound Whisper) is also wrapped
+   in asyncio.to_thread() inside _handle_audio.
 
-Does NOT:
-  - Modify DecisionEngine
-  - Modify ContextBuilder
-  - Duplicate Telegram or Firestore code
+5. expert_service.create_ticket() and generate_expert_summary() (both
+   blocking — Firestore write and Gemini call respectively) are wrapped in
+   asyncio.to_thread() inside the callback_query handler.
+
+6. context["detected_language"] is stored in _pending_context so the expert
+   ticket carries the farmer's language for future use by the dashboard or
+   expert reply translation.
+
+Architecture is otherwise identical to the previous version.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -59,17 +67,16 @@ _SORRY_AUDIO = (
 #
 # Key   : user_id (str)
 # Value : {
-#     "context"          : Dict — the full context from decision_engine
-#     "question"         : str  — the farmer's question / transcript
-#     "ai_response"      : str  — the AI text sent to the farmer
+#     "chat_id"          : int
+#     "context"          : Dict   ← includes detected_language
+#     "question"         : str
+#     "ai_response"      : str
 #     "image_path"       : str | None
 #     "voice_path"       : str | None
 #     "voice_transcript" : str | None
-#     "chat_id"          : int
 # }
 #
-# This store is process-scoped (lives as long as the FastAPI worker).
-# For multi-worker deployments, replace with Redis or Firestore-backed cache.
+# Process-scoped. For multi-worker deployments replace with Redis.
 # ---------------------------------------------------------------------------
 
 _pending_context: Dict[str, Dict[str, Any]] = {}
@@ -88,14 +95,18 @@ def _store_pending(
 ) -> None:
     _pending_context[user_id] = {
         "chat_id": chat_id,
-        "context": context,
+        "context": context,          # carries detected_language
         "question": question,
         "ai_response": ai_response,
         "image_path": image_path,
         "voice_path": voice_path,
         "voice_transcript": voice_transcript,
     }
-    logger.info("Pending context stored for user_id=%s", user_id)
+    logger.info(
+        "Pending context stored user_id=%s language=%s",
+        user_id,
+        context.get("detected_language", "unknown"),
+    )
 
 
 def _pop_pending(user_id: str) -> Optional[Dict[str, Any]]:
@@ -103,22 +114,28 @@ def _pop_pending(user_id: str) -> Optional[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Internal: handle audio (UNCHANGED logic; only send call replaced)
+# _handle_audio — voice / audio / video_note
 # ---------------------------------------------------------------------------
 
 async def _handle_audio(
     chat_id: int,
     user_id: str,
     file_id: str,
-    voice_path_str: Optional[str] = None,
 ) -> None:
     """
-    Shared handler for voice, audio, and video_note messages.
-    Downloads the file, converts to WAV, transcribes, then calls decision engine.
+    Shared handler for all audio-type messages.
+
+    Blocking calls offloaded to thread pool:
+      - speech_to_text_service.transcribe()  (CPU-bound Whisper)
+      - decision_engine.async_process()      (blocking Gemini HTTP)
     """
     wav_path = await download_and_convert_audio(file_id)
 
-    raw_result = speech_to_text_service.transcribe(str(wav_path))
+    # Whisper is CPU-bound — keep the event loop free
+    raw_result = await asyncio.to_thread(
+        speech_to_text_service.transcribe,
+        str(wav_path),
+    )
 
     if isinstance(raw_result, dict):
         transcribed_text = raw_result.get("text", "").strip()
@@ -131,10 +148,9 @@ async def _handle_audio(
         await send_message(chat_id, _SORRY_AUDIO)
         return
 
-    # Expose context from decision_engine
-    context = decision_engine.context_builder.build(user_id=user_id)
-
-    result = decision_engine.process(
+    # async_process runs the full blocking pipeline in a thread.
+    # It also detects language and stores it in context["detected_language"].
+    result, context = await decision_engine.async_process(
         user_id=user_id,
         message=transcribed_text,
     )
@@ -148,11 +164,7 @@ async def _handle_audio(
         voice_path=str(wav_path),
         voice_transcript=transcribed_text,
     )
-    if isinstance(result, tuple):
-        print("===== RESULT IS TUPLE =====")
-        print(result)
-        print("===========================")
-        result = result[0]
+
     await send_message_with_keyboard(
         chat_id=chat_id,
         ai_response=result,
@@ -169,13 +181,13 @@ async def telegram_webhook(request: Request):
     """
     Telegram webhook endpoint.
 
-    Routes incoming updates by message type:
-      • text         → decision_engine.process() → send_message_with_keyboard()
-      • photo        → download_photo() → decision_engine.process() → keyboard
-      • voice        → audio pipeline → decision_engine.process() → keyboard
-      • audio        → audio pipeline → decision_engine.process() → keyboard
-      • video_note   → audio pipeline → decision_engine.process() → keyboard
-      • callback_query (button press) → create expert ticket → confirm to farmer
+    Message type routing:
+      text         → async_process() → send_message_with_keyboard()
+      photo        → download_photo() → async_process() → keyboard
+      voice        → _handle_audio()
+      audio        → _handle_audio()
+      video_note   → _handle_audio()
+      callback_query (button press) → create expert ticket → confirm to farmer
     """
     data = await request.json()
 
@@ -186,7 +198,6 @@ async def telegram_webhook(request: Request):
     update = Update.de_json(data, None)
 
     # -------------------------------------------------------- CALLBACK QUERY
-    # Farmer pressed the "👨‍🌾 Send to Expert" inline button.
     if update.callback_query:
         cq = update.callback_query
         callback_data: str = cq.data or ""
@@ -200,24 +211,18 @@ async def telegram_webhook(request: Request):
         )
 
         if not callback_data.startswith(EXPERT_CALLBACK_PREFIX):
-            # Unknown button — just acknowledge silently
             await send_callback_answer(callback_query_id)
             return {"status": "ignored"}
 
-        # Extract user_id from callback_data
         user_id = callback_data[len(EXPERT_CALLBACK_PREFIX):]
 
-        # Answer immediately to remove loading spinner
-        await send_callback_answer(
-            callback_query_id,
-            text="Processing your request…",
-        )
+        # Answer immediately — removes the loading spinner
+        await send_callback_answer(callback_query_id, text="Processing your request…")
 
-        # Retrieve pending context
         pending = _pop_pending(user_id)
         if not pending:
             logger.warning(
-                "No pending context found for user_id=%s — cannot create ticket",
+                "No pending context for user_id=%s — session expired",
                 user_id,
             )
             await send_message(
@@ -226,17 +231,18 @@ async def telegram_webhook(request: Request):
             )
             return {"status": "session_expired"}
 
-        context: Dict[str, Any] = pending["context"]
-        question: str = pending["question"]
-        ai_response: str = pending["ai_response"]
+        context: Dict[str, Any]  = pending["context"]    # includes detected_language
+        question: str            = pending["question"]
+        ai_response: str         = pending["ai_response"]
         image_path: Optional[str] = pending.get("image_path")
         voice_path: Optional[str] = pending.get("voice_path")
         voice_transcript: Optional[str] = pending.get("voice_transcript")
 
-        # Generate AI summary
+        # Generate AI summary (calls Gemini — blocking → thread)
         logger.info("Generating expert AI summary for user_id=%s", user_id)
         try:
-            ai_summary = generate_expert_summary(
+            ai_summary = await asyncio.to_thread(
+                generate_expert_summary,
                 question=question,
                 ai_response=ai_response,
                 context=context,
@@ -245,10 +251,11 @@ async def telegram_webhook(request: Request):
             logger.exception("AI summary generation failed: %s", exc)
             ai_summary = "Expert summary generation failed. Please review the AI response."
 
-        # Create expert ticket in Firestore
+        # Create Firestore ticket (blocking → thread)
         logger.info("Creating expert ticket for user_id=%s", user_id)
         try:
-            ticket_id = expert_service.create_ticket(
+            ticket_id = await asyncio.to_thread(
+                expert_service.create_ticket,
                 user_id=user_id,
                 chat_id=chat_id,
                 context=context,
@@ -260,23 +267,27 @@ async def telegram_webhook(request: Request):
                 voice_transcript=voice_transcript,
             )
             logger.info(
-                "Expert ticket created ticket_id=%s user_id=%s",
+                "Expert ticket created ticket_id=%s user_id=%s language=%s",
                 ticket_id,
                 user_id,
+                context.get("detected_language", "unknown"),
             )
         except Exception as exc:
-            logger.exception("Expert ticket creation failed user_id=%s: %s", user_id, exc)
+            logger.exception(
+                "Expert ticket creation failed user_id=%s: %s",
+                user_id,
+                exc,
+            )
             await send_message(
                 chat_id,
                 "❌ Sorry, we could not create your expert request at this time. Please try again.",
             )
             return {"status": "ticket_creation_failed"}
 
-        # Confirm to farmer
         confirmation = expert_service.confirmation_message(ticket_id)
         await send_message(chat_id, confirmation)
         logger.info(
-            "Telegram callback handled successfully ticket_id=%s chat_id=%s",
+            "Callback handled ticket_id=%s chat_id=%s",
             ticket_id,
             chat_id,
         )
@@ -294,14 +305,8 @@ async def telegram_webhook(request: Request):
     if update.message.text:
         logger.info("Received TEXT message from chat_id=%s", chat_id)
 
-        # Build context so we can store it for ticket creation
-        try:
-            context = decision_engine.context_builder.build(user_id=user_id)
-        except Exception as exc:
-            logger.warning("Could not pre-build context: %s", exc)
-            context = {}
-
-        result = decision_engine.process(
+        # async_process detects language internally and stores it in context
+        result, context = await decision_engine.async_process(
             user_id=user_id,
             message=update.message.text,
         )
@@ -313,11 +318,7 @@ async def telegram_webhook(request: Request):
             question=update.message.text,
             ai_response=result,
         )
-        if isinstance(result, tuple):
-            print("===== RESULT IS TUPLE =====")
-            print(result)
-            print("===========================")
-            result = result[0]
+
         await send_message_with_keyboard(
             chat_id=chat_id,
             ai_response=result,
@@ -340,13 +341,8 @@ async def telegram_webhook(request: Request):
 
         image_path = await download_photo(largest_photo.file_id)
 
-        try:
-            context = decision_engine.context_builder.build(user_id=user_id)
-        except Exception as exc:
-            logger.warning("Could not pre-build context: %s", exc)
-            context = {}
-
-        result = decision_engine.process(
+        # Caption language drives the response language
+        result, context = await decision_engine.async_process(
             user_id=user_id,
             message=caption,
             image_path=str(image_path),
@@ -360,11 +356,7 @@ async def telegram_webhook(request: Request):
             ai_response=result,
             image_path=str(image_path),
         )
-        if isinstance(result, tuple):
-            print("===== RESULT IS TUPLE =====")
-            print(result)
-            print("===========================")
-            result = result[0]
+
         await send_message_with_keyboard(
             chat_id=chat_id,
             ai_response=result,
@@ -375,7 +367,7 @@ async def telegram_webhook(request: Request):
     # ----------------------------------------------------------------- VOICE
     if update.message.voice:
         logger.info(
-            "Received VOICE message from chat_id=%s file_id=%s",
+            "Received VOICE message chat_id=%s file_id=%s",
             chat_id,
             update.message.voice.file_id,
         )
@@ -385,7 +377,7 @@ async def telegram_webhook(request: Request):
     # ----------------------------------------------------------------- AUDIO
     if update.message.audio:
         logger.info(
-            "Received AUDIO message from chat_id=%s file_id=%s filename=%s",
+            "Received AUDIO message chat_id=%s file_id=%s filename=%s",
             chat_id,
             update.message.audio.file_id,
             update.message.audio.file_name,
@@ -396,7 +388,7 @@ async def telegram_webhook(request: Request):
     # ------------------------------------------------------------- VIDEO NOTE
     if update.message.video_note:
         logger.info(
-            "Received VIDEO_NOTE from chat_id=%s file_id=%s",
+            "Received VIDEO_NOTE chat_id=%s file_id=%s",
             chat_id,
             update.message.video_note.file_id,
         )
@@ -405,7 +397,7 @@ async def telegram_webhook(request: Request):
 
     # -------------------------------------------------------- UNSUPPORTED TYPE
     logger.info(
-        "Received unsupported message type from chat_id=%s — ignoring",
+        "Unsupported message type from chat_id=%s — ignoring",
         chat_id,
     )
     return {"status": "ignored"}

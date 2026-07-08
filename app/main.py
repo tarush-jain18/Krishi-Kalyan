@@ -22,7 +22,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-#from app.api.expert import router as expert_router        # ← NEW
+from app.api.expert import router as expert_router        # ← NEW
 from app.api.telegram import router as telegram_router
 from app.api.voice import router as voice_router
 from app.core.exceptions import KrishiKalyanException, ValidationException
@@ -211,7 +211,7 @@ async def chat_with_image(
 
 app.include_router(voice_router, tags=["Voice"])
 app.include_router(telegram_router)
-#app.include_router(expert_router)              # ← NEW: /expert/reply, /expert/tickets
+app.include_router(expert_router)              # ← NEW: /expert/reply, /expert/tickets
 
 
 # ---------------------------------------------------------------------------

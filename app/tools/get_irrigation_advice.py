@@ -2,12 +2,13 @@ from app.services.weather.service import weather_service
 from app.services.earth_engine import earth_engine_service
 
 
-def get_irrigation_advice(
-    district: str,
-    latitude: float,
-    longitude: float,
-    crop: str,
-):
+def get_irrigation_advice(snapshot: dict):
+
+    district = snapshot["district"]
+    latitude = snapshot["latitude"]
+    longitude = snapshot["longitude"]
+    crop = snapshot["crop"]
+
     weather = weather_service.get_current_weather(district)
 
     crop_health = earth_engine_service.get_crop_health(
@@ -34,11 +35,11 @@ def get_irrigation_advice(
         irrigate = True
         reason.append("Satellite indicates stressed vegetation.")
 
-    if irrigate:
-        advice = "Irrigation recommended."
-
-    else:
-        advice = "No irrigation needed today."
+    advice = (
+        "Irrigation recommended."
+        if irrigate
+        else "No irrigation needed today."
+    )
 
     return {
         "crop": crop,

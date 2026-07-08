@@ -1,3 +1,16 @@
+"""
+app/services/gemini.py
+
+Change vs previous version
+---------------------------
+The three post-tool nudge builders now receive `context` as a keyword
+argument so they can append a language reminder line.  This prevents Gemini
+from drifting back to English after processing a tool result — the most
+common place where language compliance breaks down.
+
+Everything else (retry logic, tool dispatch, content building) is unchanged.
+"""
+
 import json
 import logging
 import time
@@ -24,12 +37,17 @@ class GeminiService:
         initial_backoff_seconds: int = 1,
     ) -> None:
         self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        self.model = model
+        self.model  = model
         self.registry = registry
         self.max_retries = max_retries
         self.initial_backoff_seconds = initial_backoff_seconds
 
-    def chat(self, prompt: str, context: Dict[str, Any], max_tool_calls: int = 3) -> Tuple[str, Optional[Dict[str, Any]]]:
+    def chat(
+        self,
+        prompt: str,
+        context: Dict[str, Any],
+        max_tool_calls: int = 3,
+    ) -> Tuple[str, Optional[Dict[str, Any]]]:
         if not prompt or not prompt.strip():
             raise GeminiException(
                 message="Prompt cannot be empty",
@@ -78,8 +96,6 @@ class GeminiService:
                 context=context,
             )
 
-            # FIX 2: Ensure the tool result is always a plain JSON-serialisable dict.
-            # Part.from_function_response() requires a dict; wrap scalars/lists.
             if isinstance(raw_result, dict):
                 tool_response_payload: Dict[str, Any] = raw_result
             else:
@@ -95,18 +111,11 @@ class GeminiService:
             logger.info(json.dumps(tool_response_payload, indent=2, ensure_ascii=False))
             logger.info("=================================")
 
-            # FIX 1: Append the model's function-call turn with role="model".
             contents.append(candidate_content)
 
-            # FIX 1 (root cause): The function response turn MUST use role="user".
-            # In the google-genai SDK the conversation alternates strictly
-            # user → model → user → model.  The Part.from_function_response()
-            # payload signals to the API that this user turn is a tool result,
-            # but the outer Content wrapper role must still be "user".
-            # Using role="tool" causes Gemini to silently discard the result.
             contents.append(
                 types.Content(
-                    role="user",                          # ← was "tool" (WRONG)
+                    role="user",
                     parts=[
                         types.Part.from_function_response(
                             name=tool_name,
@@ -116,34 +125,35 @@ class GeminiService:
                 )
             )
 
-            # After delivering the tool result, append a plain-text user
-            # instruction so Gemini is explicitly told to produce the final
-            # answer using the result above. Use a diagnosis-specific nudge
-            # for get_pest_diagnosis (which echoes back key fields so Gemini
-            # does not have to re-parse the JSON), and a generic nudge for all
-            # other tools.
+            # -----------------------------------------------------------
+            # Post-tool nudge — context is passed so the nudge builder
+            # can append a language reminder, preventing Gemini from
+            # drifting back to English after seeing tool JSON output.
+            # -----------------------------------------------------------
             if tool_name == "get_pest_diagnosis":
-
                 nudge_text = prompt_builder.build_post_diagnosis_nudge(
-                    tool_response_payload
+                    tool_response_payload,
+                    context=context,          # ← NEW
                 )
-
             elif tool_name == "get_fertilizer_recommendation":
-
                 nudge_text = prompt_builder.build_post_fertilizer_nudge(
-                    tool_response_payload
+                    tool_response_payload,
+                    context=context,          # ← NEW
                 )
-
             elif tool_name == "get_irrigation_recommendation":
                 nudge_text = prompt_builder.build_post_irrigation_nudge(
-                    tool_response_payload
+                    tool_response_payload,
+                    context=context,          # ← NEW
                 )
             else:
-
+                lang_code  = context.get("detected_language") or "en"
+                from app.engine.prompt_builder import _LANGUAGE_NAMES
+                lang_label = _LANGUAGE_NAMES.get(lang_code, lang_code)
                 nudge_text = (
                     "The tool has returned its result above. "
                     "Now provide the complete final answer to the farmer "
-                    "using ONLY that result. Do NOT call any tool again."
+                    "using ONLY that result. Do NOT call any tool again.\n\n"
+                    f"⚠️ IMPORTANT: Write your ENTIRE response in {lang_label}."
                 )
 
             contents.append(
@@ -158,6 +168,10 @@ class GeminiService:
             details={"max_tool_calls": max_tool_calls},
         )
 
+    # ------------------------------------------------------------------
+    # Internal helpers — all unchanged
+    # ------------------------------------------------------------------
+
     def _generate_content(self, contents: List[types.Content]) -> Any:
         for attempt in range(self.max_retries + 1):
             try:
@@ -167,9 +181,6 @@ class GeminiService:
                     config=types.GenerateContentConfig(
                         tools=[self.registry.gemini_tool],
                         temperature=0.4,
-                        # System instruction is sent separately so it stays
-                        # at the top of Gemini's attention on every turn,
-                        # regardless of how many tool-call rounds have elapsed.
                         system_instruction=SYSTEM_INSTRUCTION,
                     ),
                 )
@@ -212,21 +223,13 @@ class GeminiService:
     ) -> None:
         if attempt >= self.max_retries:
             if self._is_quota_error(exc):
-                logger.error(
-                    "Gemini quota exhausted after %s retries",
-                    self.max_retries,
-                )
+                logger.error("Gemini quota exhausted after %s retries", self.max_retries)
                 raise GeminiQuotaExceeded(
-                    message=(
-                        "Gemini quota exceeded. Please try again after some time."
-                    ),
+                    message="Gemini quota exceeded. Please try again after some time.",
                     details=self._exception_details(exc),
                 ) from exc
 
-            logger.error(
-                "Gemini API failed after %s retries",
-                self.max_retries,
-            )
+            logger.error("Gemini API failed after %s retries", self.max_retries)
             raise GeminiException(
                 message="Gemini API failed after retries",
                 details=self._exception_details(exc),
@@ -282,9 +285,8 @@ class GeminiService:
     @staticmethod
     def _is_quota_error(exc: Exception) -> bool:
         status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-        status = str(getattr(exc, "status", "") or "").upper()
+        status  = str(getattr(exc, "status", "") or "").upper()
         message = str(exc).upper()
-
         return (
             status_code == 429
             or "RESOURCE_EXHAUSTED" in status
