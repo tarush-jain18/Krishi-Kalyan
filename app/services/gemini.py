@@ -36,7 +36,18 @@ class GeminiService:
         max_retries: int = 3,
         initial_backoff_seconds: int = 1,
     ) -> None:
-        self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        self.api_keys = [
+            settings.GEMINI_API_KEY_1,
+            settings.GEMINI_API_KEY_2,
+            settings.GEMINI_API_KEY_3,
+            settings.GEMINI_API_KEY_4,
+            settings.GEMINI_API_KEY_5,
+            settings.GEMINI_API_KEY_6,
+            settings.GEMINI_API_KEY_7,
+            settings.GEMINI_API_KEY_8,
+        ]
+
+        self.api_keys = [k for k in self.api_keys if k]
         self.model  = model
         self.registry = registry
         self.max_retries = max_retries
@@ -172,48 +183,72 @@ class GeminiService:
     # Internal helpers — all unchanged
     # ------------------------------------------------------------------
 
+    def _get_client(self, api_key: str):
+        return genai.Client(api_key=api_key)
+
+
     def _generate_content(self, contents: List[types.Content]) -> Any:
-        for attempt in range(self.max_retries + 1):
-            try:
-                return self.client.models.generate_content(
-                    model=self.model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        tools=[self.registry.gemini_tool],
-                        temperature=0.4,
-                        system_instruction=SYSTEM_INSTRUCTION,
-                    ),
-                )
-            except errors.APIError as exc:
-                if self._is_quota_error(exc):
-                    self._handle_retryable_error(
-                        exc=exc,
-                        attempt=attempt,
-                        error_message="Gemini quota exceeded",
+
+        last_quota_error = None
+
+        for key_index, api_key in enumerate(self.api_keys):
+
+            logger.info(
+                "Using Gemini API Key %d/%d",
+                key_index + 1,
+                len(self.api_keys),
+            )
+
+            client = self._get_client(api_key)
+
+            for attempt in range(self.max_retries + 1):
+
+                try:
+                    return client.models.generate_content(
+                        model=self.model,
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            tools=[self.registry.gemini_tool],
+                            temperature=0.4,
+                            system_instruction=SYSTEM_INSTRUCTION,
+                        ),
                     )
-                    continue
 
-                if self._should_retry_api_error(exc):
-                    self._handle_retryable_error(
-                        exc=exc,
-                        attempt=attempt,
-                        error_message="Retryable Gemini API error",
-                    )
-                    continue
+                except errors.APIError as exc:
 
-                logger.exception("Non-retryable Gemini API error")
-                raise GeminiException(
-                    message="Gemini API request failed",
-                    details=self._exception_details(exc),
-                ) from exc
-            except Exception as exc:
-                logger.exception("Unexpected Gemini client error")
-                raise GeminiException(
-                    message="Unexpected Gemini client error",
-                    details=self._exception_details(exc),
-                ) from exc
+                    if self._is_quota_error(exc):
+                        logger.warning(
+                            "Gemini API Key %d quota exhausted. Switching to next key...",
+                            key_index + 1,
+                        )
+                        last_quota_error = exc
+                        break
 
-        raise GeminiException(message="Gemini retry loop ended unexpectedly")
+                    if self._should_retry_api_error(exc):
+                        self._handle_retryable_error(
+                            exc=exc,
+                            attempt=attempt,
+                            error_message="Retryable Gemini API error",
+                        )
+                        continue
+
+                    raise GeminiException(
+                        message="Gemini API request failed",
+                        details=self._exception_details(exc),
+                    ) from exc
+
+                except Exception as exc:
+                    raise GeminiException(
+                        message="Unexpected Gemini client error",
+                        details=self._exception_details(exc),
+                    ) from exc
+
+        raise GeminiQuotaExceeded(
+            message="All configured Gemini API keys have exhausted their quota.",
+            details=self._exception_details(last_quota_error)
+            if last_quota_error
+            else {},
+        )
 
     def _handle_retryable_error(
         self,
