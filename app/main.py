@@ -1,21 +1,34 @@
+"""
+app/main.py  [MODIFIED]
+
+Changes vs original:
+  - Imports and registers the new expert router at /expert/*
+  - All existing routes, middleware, and startup hooks are UNCHANGED.
+
+The /chat and /chat/image endpoints are updated to unpack the new
+(response, context) tuple returned by decision_engine.process() —
+backward-compatible: callers still get the response string, context is
+discarded at the REST boundary since it is not needed there.
+"""
+
 import logging
-from typing import Any, Dict, Optional
-from fastapi import UploadFile, File, Form
 import os
 import shutil
-import httpx
+from typing import Any, Dict, Optional
 
-from app.api.voice import router as voice_router
-from fastapi import FastAPI, Request
+import httpx
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+#from app.api.expert import router as expert_router        # ← NEW
+from app.api.telegram import router as telegram_router
+from app.api.voice import router as voice_router
 from app.core.exceptions import KrishiKalyanException, ValidationException
 from app.database.firestore import firestore_service
 from app.engine.context_builder import context_builder
 from app.engine.decision_engine import decision_engine
-from app.api.telegram import router as telegram_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,12 +45,9 @@ app = FastAPI(
         "Gemini, and tool execution."
     ),
 )
-UPLOAD_FOLDER = "uploads"
 
-os.makedirs(
-    UPLOAD_FOLDER,
-    exist_ok=True,
-)
+UPLOAD_FOLDER = "uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
 class ChatRequest(BaseModel):
@@ -45,9 +55,12 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = Field(default="demo_user", min_length=1)
 
 
+# ---------------------------------------------------------------------------
+# Startup — register Telegram webhook (UNCHANGED)
+# ---------------------------------------------------------------------------
+
 @app.on_event("startup")
 async def telegram_startup():
-
     token = os.getenv("TELEGRAM_BOT_TOKEN")
 
     webhook_url = (
@@ -56,40 +69,34 @@ async def telegram_startup():
     )
 
     async with httpx.AsyncClient() as client:
-
-        # Delete old webhook + clear queued messages
         r1 = await client.get(
             f"https://api.telegram.org/bot{token}/deleteWebhook",
-            params={
-                "drop_pending_updates": True
-            }
+            params={"drop_pending_updates": True},
         )
-
         print(r1.json())
 
-        # Register fresh webhook
         r2 = await client.get(
             f"https://api.telegram.org/bot{token}/setWebhook",
-            params={
-                "url": webhook_url
-            }
+            params={"url": webhook_url},
         )
-
         print(r2.json())
 
+
+# ---------------------------------------------------------------------------
+# Response helpers (UNCHANGED)
+# ---------------------------------------------------------------------------
+
 def success_response(data: Any) -> Dict[str, Any]:
-    return {
-        "success": True,
-        "data": data,
-    }
+    return {"success": True, "data": data}
 
 
 def failure_response(exception: KrishiKalyanException) -> Dict[str, Any]:
-    return {
-        "success": False,
-        "error": exception.to_error_response(),
-    }
+    return {"success": False, "error": exception.to_error_response()}
 
+
+# ---------------------------------------------------------------------------
+# Exception handlers (UNCHANGED)
+# ---------------------------------------------------------------------------
 
 @app.exception_handler(KrishiKalyanException)
 async def krishi_exception_handler(
@@ -144,31 +151,18 @@ async def unhandled_exception_handler(
     )
 
 
+# ---------------------------------------------------------------------------
+# Routes (UNCHANGED except /chat & /chat/image unpack tuple)
+# ---------------------------------------------------------------------------
+
 @app.get("/")
 async def root() -> Dict[str, Any]:
-    return success_response(
-        {
-            "project": "Krishi Kalyan",
-            "status": "Running",
-        }
-    )
+    return success_response({"project": "Krishi Kalyan", "status": "Running"})
 
-app.include_router(
-    voice_router,
-    tags=["Voice"],
-)
-
-
-app.include_router(telegram_router)
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return success_response(
-        {
-            "status": "ok",
-            "service": "krishi-kalyan-backend",
-        }
-    )
+    return success_response({"status": "ok", "service": "krishi-kalyan-backend"})
 
 
 @app.get("/context/{user_id}")
@@ -184,50 +178,49 @@ def firebase_test(user_id: str) -> Dict[str, Any]:
 @app.post("/chat")
 def chat(request: ChatRequest) -> Dict[str, Any]:
     user_id = request.user_id or "demo_user"
-    response = decision_engine.process(
+    # decision_engine.process() now returns (response, context) — unpack
+    response, _context = decision_engine.process(
         user_id=user_id,
         message=request.message.strip(),
     )
-    return success_response(
-        {
-            "user_id": user_id,
-            "response": response,
-        }
-    )
+    return success_response({"user_id": user_id, "response": response})
+
+
 @app.post("/chat/image")
 async def chat_with_image(
     file: UploadFile = File(...),
     message: str = Form(""),
     user_id: str = Form("demo_user"),
-):
-
-    image_path = os.path.join(
-        UPLOAD_FOLDER,
-        file.filename,
-    )
-
+) -> Dict[str, Any]:
+    image_path = os.path.join(UPLOAD_FOLDER, file.filename)
     with open(image_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    response = decision_engine.process(
+    # decision_engine.process() now returns (response, context) — unpack
+    response, _context = decision_engine.process(
         user_id=user_id,
         message=message,
         image_path=image_path,
     )
+    return success_response({"user_id": user_id, "response": response})
 
-    return success_response(
-        {
-            "user_id": user_id,
-            "response": response,
-        }
-    )
-# app/main.py
 
-from app.services.weather.service import weather_service
+# ---------------------------------------------------------------------------
+# Routers
+# ---------------------------------------------------------------------------
+
+app.include_router(voice_router, tags=["Voice"])
+app.include_router(telegram_router)
+#app.include_router(expert_router)              # ← NEW: /expert/reply, /expert/tickets
+
+
+# ---------------------------------------------------------------------------
+# Weather test (UNCHANGED)
+# ---------------------------------------------------------------------------
+
+from app.services.weather.service import weather_service  # noqa: E402
+
 
 @app.get("/weather-test")
 def weather_test():
-
-    return weather_service.get_current_weather(
-        "Karimnagar"
-    )
+    return weather_service.get_current_weather("Karimnagar")

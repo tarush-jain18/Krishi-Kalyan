@@ -16,11 +16,9 @@ class PestPredictor(BasePredictor):
     def __init__(self):
 
         base_dir = os.path.dirname(__file__)
-        model_dir = os.path.join(base_dir, "models")
+        self.model_dir = os.path.join(base_dir, "models")
 
-        self.model = tf.keras.models.load_model(
-            os.path.join(model_dir, "final_pest_model.keras")
-        )
+        self.model = None
 
         self.class_names = [
             "Cashew anthracnose",
@@ -46,9 +44,18 @@ class PestPredictor(BasePredictor):
             "Tomato septoria leaf spot",
             "Tomato verticulium wilt",
         ]
+    def load_model(self):
 
+        if self.model is None:
+
+            self.model = tf.keras.models.load_model(
+                os.path.join(
+                    self.model_dir,
+                    "final_pest_model.keras",
+                )
+            )
     def predict(self, image_path: str):
-
+        self.load_model()
         image = tf.keras.utils.load_img(
             image_path,
             target_size=self.IMG_SIZE,

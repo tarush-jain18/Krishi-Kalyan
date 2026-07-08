@@ -1,3 +1,22 @@
+# Virtual environments
+venv/
+venv311/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Models
+*.pkl
+
+# Credentials
+app/credentials/
+*.json
+
+# macOS
+.DS_Store
 # ==========================================
 # Python
 # ==========================================

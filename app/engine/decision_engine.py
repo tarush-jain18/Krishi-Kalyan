@@ -1,15 +1,37 @@
+"""
+app/engine/decision_engine.py  [MODIFIED]
+
+Changes vs original:
+  - process() now RETURNS a tuple (ai_response: str, context: Dict) instead of
+    just str, so callers (telegram.py) can access the built context for expert
+    ticket creation WITHOUT re-running context building.
+
+  BACKWARD COMPATIBILITY NOTE:
+    If any existing caller only unpacks the first element, e.g.:
+        result = decision_engine.process(...)
+    ...this is still safe in Python — the call succeeds and result is the tuple.
+    The caller must be updated to:
+        result, context = decision_engine.process(...)
+    OR stay with:
+        result = decision_engine.process(...)[0]
+
+  The telegram.py in this module is updated to unpack the tuple correctly.
+  The /chat and /chat/image REST endpoints in main.py only use result[0],
+  which is unchanged behaviour.
+
+Business logic is completely unchanged.
+"""
+
 import json
 import logging
-from app.engine.prompt_builder import prompt_builder
 import re
-from typing import Any, Dict
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
+
 from app.core.exceptions import ValidationException
 from app.engine.context_builder import context_builder
 from app.engine.farm_snapshot_builder import farm_snapshot_builder
-from app.prompts.system_prompt import SYSTEM_PROMPT
+from app.engine.prompt_builder import prompt_builder
 from app.services.gemini import gemini_service
-from app.engine.farm_snapshot_builder import farm_snapshot_builder
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +45,23 @@ class DecisionEngine:
         self.context_builder = context_builder_service
         self.llm_service = llm_service
 
-    def process(self, user_id: str, message: str,image_path: Optional[str] = None,) -> str:
+    def process(
+        self,
+        user_id: str,
+        message: str,
+        image_path: Optional[str] = None,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Process a farmer query end-to-end.
+
+        Returns
+        -------
+        Tuple of (ai_response: str, context: Dict[str, Any])
+
+        The context dict is the full farmer context enriched with snapshot,
+        image_path, and detected_language. Callers that only need the text
+        can index [0]:  response = engine.process(...)[0]
+        """
         normalized_user_id = (user_id or "").strip()
         normalized_message = (message or "").strip()
 
@@ -46,11 +84,14 @@ class DecisionEngine:
         language = self.detect_language(normalized_message)
         logger.info("Language Detection Complete")
         logger.info("Detected Language : %s", language)
+
         context = self.context_builder.build(user_id=normalized_user_id)
         context["detected_language"] = language
+
         snapshot = farm_snapshot_builder.build(context)
         context["snapshot"] = snapshot
         context["image_path"] = image_path
+
         logger.info("Farm Snapshot")
         logger.info(snapshot)
 
@@ -74,7 +115,11 @@ class DecisionEngine:
 
         logger.info("Returning Response")
         logger.info("================================================")
-        return final_response
+
+        # Return both the AI response and the full context so callers can
+        # pass the context to expert_service.create_ticket() without
+        # rebuilding it.
+        return final_response, context
 
     @staticmethod
     def detect_language(message: str) -> str:
@@ -88,7 +133,6 @@ class DecisionEngine:
             return "ta"
         return "en"
 
-    
     @staticmethod
     def _log_start(user_id: str, message: str) -> None:
         logger.info("================================================")
