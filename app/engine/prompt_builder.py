@@ -138,12 +138,12 @@ FARMER_LANGUAGE: {lang_label}
 ==========================
 FARMER PROFILE
 ==========================
-{json.dumps(context.get("user", {}), indent=2)}
+{json.dumps(context.get("user", {}), indent=2,default=str)}
 
 ==========================
 FARM DETAILS
 ==========================
-{json.dumps(context.get("farm", {}), indent=2)}
+{json.dumps(context.get("farm", {}), indent=2,default=str)}
 
 ==========================
 WEATHER (Live)
